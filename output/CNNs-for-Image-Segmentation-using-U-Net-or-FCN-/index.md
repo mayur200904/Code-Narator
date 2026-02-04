@@ -1,50 +1,60 @@
 # Tutorial: CNNs-for-Image-Segmentation-using-U-Net-or-FCN-
 
-This project is like an *intelligent digital artist* that can precisely **identify and outline** every object within an image, pixel by pixel. It takes an ordinary photo, processes it, and then uses a powerful pre-trained AI model to create a detailed map showing exactly where things like people, cars, or trees are located, finally displaying these *segmentation masks* clearly.
+This project focuses on **semantic image segmentation**, a technique that assigns labels to each pixel in an image, much like painting by numbers. It utilizes *pretrained CNN architectures* like U-Net, FCN, and DeepLabV3 to perform this task at a high level of detail. The goal is to achieve a deep understanding of image content by segmenting objects rather than just classifying them.
 
 
 **Source Repository:** [https://github.com/PrathamPatil17/CNNs-for-Image-Segmentation-using-U-Net-or-FCN-](https://github.com/PrathamPatil17/CNNs-for-Image-Segmentation-using-U-Net-or-FCN-)
 
 ```mermaid
 flowchart TD
-    A0["Image Preprocessing Pipeline
+    A0["Semantic Image Segmentation
 "]
-    A1["Semantic Segmentation Model
+    A1["Pretrained CNN Architectures
 "]
-    A2["Model Inference Engine
+    A2["Image Preprocessing
 "]
-    A3["Segmentation Mask Generation
+    A3["Model Selection
 "]
-    A4["Class Definition and Coloring
+    A4["Segmentation Mask
 "]
-    A5["Results Visualization
+    A5["COCO/VOC Classes
 "]
-    A6["Deep Learning Workflow Description
+    A6["Atrous Convolutions
 "]
-    A0 -- "Provides Input" --> A2
-    A2 -- "Uses" --> A1
-    A2 -- "Outputs Raw Predictions" --> A3
-    A3 -- "Generates Mask" --> A5
-    A4 -- "Provides Color Map" --> A5
-    A6 -- "Explains Core Logic" --> A1
+    A7["Overlay Visualization
+"]
+    A8["Model Processing Steps
+"]
+    A0 -- "Achieved by" --> A1
+    A2 -- "Prepares data for" --> A0
+    A3 -- "Chooses" --> A1
+    A4 -- "Used in" --> A7
+    A5 -- "Defines" --> A4
+    A6 -- "Enhances" --> A1
+    A7 -- "Visualizes" --> A0
+    A8 -- "Guides" --> A0
 ```
 
 ## Chapters
 
-1. [Deep Learning Workflow Description
-](01_deep_learning_workflow_description_.md)
-2. [Semantic Segmentation Model
-](02_semantic_segmentation_model_.md)
-3. [Model Inference Engine
-](03_model_inference_engine_.md)
-4. [Image Preprocessing Pipeline
-](04_image_preprocessing_pipeline_.md)
-5. [Segmentation Mask Generation
-](05_segmentation_mask_generation_.md)
-6. [Class Definition and Coloring
-](06_class_definition_and_coloring_.md)
-7. [Results Visualization
-](07_results_visualization_.md)
+1. [Semantic Image Segmentation
+](01_semantic_image_segmentation_.md)
+2. [Image Preprocessing
+](02_image_preprocessing_.md)
+3. [COCO/VOC Classes
+](03_coco_voc_classes_.md)
+4. [Segmentation Mask
+](04_segmentation_mask_.md)
+5. [Overlay Visualization
+](05_overlay_visualization_.md)
+6. [Pretrained CNN Architectures
+](06_pretrained_cnn_architectures_.md)
+7. [Model Selection
+](07_model_selection_.md)
+8. [Atrous Convolutions
+](08_atrous_convolutions_.md)
+9. [Model Processing Steps
+](09_model_processing_steps_.md)
 
 
 ---

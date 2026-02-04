@@ -7,44 +7,23 @@ from flow import create_tutorial_flow
 dotenv.load_dotenv()
 
 # Default file patterns
-DEFAULT_INCLUDE_PATTERNS = {
-    "*.py", "*.js", "*.jsx", "*.ts", "*.tsx", "*.go", "*.java", "*.pyi", "*.pyx",
-    "*.c", "*.cc", "*.cpp", "*.h", "*.md", "*.rst", "*Dockerfile",
-    "*Makefile", "*.yaml", "*.yml",
-}
+from core.constants import DEFAULT_INCLUDE_PATTERNS, DEFAULT_EXCLUDE_PATTERNS
 
-DEFAULT_EXCLUDE_PATTERNS = {
-    "assets/*", "data/*", "images/*", "public/*", "static/*", "temp/*",
-    "*docs/*",
-    "*venv/*",
-    "*.venv/*",
-    "*test*",
-    "*tests/*",
-    "*examples/*",
-    "v1/*",
-    "*dist/*",
-    "*build/*",
-    "*experimental/*",
-    "*deprecated/*",
-    "*misc/*",
-    "*legacy/*",
-    ".git/*", ".github/*", ".next/*", ".vscode/*",
-    "*obj/*",
-    "*bin/*",
-    "*node_modules/*",
-    "*.log"
-}
+
+
+# Import the core pipeline logic
+from core.pipeline import run_tutorial_pipeline
 
 # --- Main Function ---
 def main():
-    parser = argparse.ArgumentParser(description="Generate a tutorial for a GitHub codebase or local directory.")
+    parser = argparse.ArgumentParser(description="Generate a tutorial for a GitHub codebase.")
 
-    # Create mutually exclusive group for source
-    source_group = parser.add_mutually_exclusive_group(required=True)
-    source_group.add_argument("--repo", help="URL of the public GitHub repository.")
-    source_group.add_argument("--dir", help="Path to local directory.")
+    # Source is now ONLY repo
+    parser.add_argument("--repo", required=True, help="URL of the public GitHub repository.")
+    
+    # Removed --dir (Local directory support removed as per usage guidelines)
 
-    parser.add_argument("-n", "--name", help="Project name (optional, derived from repo/directory if omitted).")
+    parser.add_argument("-n", "--name", help="Project name (optional, derived from repo if omitted).")
     parser.add_argument("-t", "--token", help="GitHub personal access token (optional, reads from GITHUB_TOKEN env var if not provided).")
     parser.add_argument("-o", "--output", default="output", help="Base directory for output (default: ./output).")
     parser.add_argument("-i", "--include", nargs="+", help="Include file patterns (e.g. '*.py' '*.js'). Defaults to common code files if not specified.")
@@ -56,56 +35,40 @@ def main():
     parser.add_argument("--no-cache", action="store_true", help="Disable LLM response caching (default: caching enabled)")
     # Add max_abstraction_num parameter to control the number of abstractions
     parser.add_argument("--max-abstractions", type=int, default=10, help="Maximum number of abstractions to identify (default: 10)")
+    
+    # Enhanced Features
+    parser.add_argument("--clean", action="store_true", help="Clean the output directory for the project before starting.")
+    parser.add_argument("--voice", default="en-US-AriaNeural", help="Voice for video narration (default: en-US-AriaNeural).")
+    parser.add_argument("--style", choices=["dark", "light", "cyberpunk"], default="dark", help="Visual style for video (default: dark).")
 
+    # Modified video flag behavior
+    parser.add_argument("--video", action="store_true", help="Generate video tutorial from EXISTING text tutorial (skips text generation). MUST be run after text generation.")
+    
     args = parser.parse_args()
 
-    # Get GitHub token from argument or environment variable if using repo
-    github_token = None
-    if args.repo:
-        github_token = args.token or os.environ.get('GITHUB_TOKEN')
-        if not github_token:
-            print("Warning: No GitHub token provided. You might hit rate limits for public repositories.")
-
-    # Initialize the shared dictionary with inputs
-    shared = {
+    # Prepare parameters for pipeline
+    params = {
         "repo_url": args.repo,
-        "local_dir": args.dir,
-        "project_name": args.name, # Can be None, FetchRepo will derive it
-        "github_token": github_token,
-        "output_dir": args.output, # Base directory for CombineTutorial output
-
-        # Add include/exclude patterns and max file size
-        "include_patterns": set(args.include) if args.include else DEFAULT_INCLUDE_PATTERNS,
-        "exclude_patterns": set(args.exclude) if args.exclude else DEFAULT_EXCLUDE_PATTERNS,
+        "project_name": args.name,
+        "output_dir": args.output,
+        "clean": args.clean,
+        "video_mode": "only" if args.video else "none",
+        "voice": args.voice,
+        "style": args.style,
+        "github_token": args.token,
+        "include_patterns": args.include,
+        "exclude_patterns": args.exclude,
         "max_file_size": args.max_size,
-
-        # Add language for multi-language support
         "language": args.language,
-        
-        # Add use_cache flag (inverse of no-cache flag)
         "use_cache": not args.no_cache,
-        
-        # Add max_abstraction_num parameter
-        "max_abstraction_num": args.max_abstractions,
-
-        # Outputs will be populated by the nodes
-        "files": [],
-        "abstractions": [],
-        "relationships": {},
-        "chapter_order": [],
-        "chapters": [],
-        "final_output_dir": None
+        "max_abstractions": args.max_abstractions
     }
-
-    # Display starting message with repository/directory and language
-    print(f"Starting tutorial generation for: {args.repo or args.dir} in {args.language.capitalize()} language")
-    print(f"LLM caching: {'Disabled' if args.no_cache else 'Enabled'}")
-
-    # Create the flow instance
-    tutorial_flow = create_tutorial_flow()
-
-    # Run the flow
-    tutorial_flow.run(shared)
+    
+    try:
+        run_tutorial_pipeline(params)
+    except Exception as e:
+        print(f"Error running pipeline: {e}")
+        exit(1)
 
 if __name__ == "__main__":
     main()

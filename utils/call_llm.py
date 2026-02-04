@@ -82,6 +82,10 @@ def _call_llm_provider(prompt: str) -> str:
     base_url = os.environ.get(base_url_var)
     api_key = os.environ.get(api_key_var, "")  # API key is optional, default to empty string
 
+    # Function to get default base URL if not provided
+    if not base_url and provider == "OPENAI":
+        base_url = "https://api.openai.com"
+
     # Validate required variables
     if not model:
         raise ValueError(f"{model_var} environment variable is required")
@@ -174,11 +178,39 @@ def _call_llm_gemini(prompt: str) -> str:
     else:
         raise ValueError("Either GEMINI_PROJECT_ID or GEMINI_API_KEY must be set in the environment")
     model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    response = client.models.generate_content(
-        model=model,
-        contents=[prompt]
-    )
-    return response.text
+    import time
+    from google.genai import errors
+    
+    retry_count = 0
+    max_retries = 5
+    base_delay = 10
+    
+    while retry_count < max_retries:
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=[prompt]
+            )
+            return response.text
+        except errors.ClientError as e:
+            if e.code == 429: # Resource Exhausted
+                wait_time = base_delay * (2 ** retry_count)
+                logger.warning(f"Rate limit hit (429). Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                retry_count += 1
+            else:
+                raise e
+        except Exception as e:
+             # Basic retry for other intermittent errors
+            if retry_count < max_retries:
+                wait_time = base_delay * (2 ** retry_count)
+                logger.warning(f"Error {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                retry_count += 1
+            else:
+                raise e
+                
+    raise Exception("Max retries exceeded for LLM call")
 
 if __name__ == "__main__":
     test_prompt = "Hello, how are you?"
