@@ -1,4 +1,5 @@
-export const API_BASE = "http://localhost:8000";
+// Use environment variable for API URL, fallback to localhost for dev
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export async function generateText(repoUrl: string, clean: boolean = false) {
     const res = await fetch(`${API_BASE}/api/generate/text`, {
