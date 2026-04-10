@@ -51,3 +51,53 @@ New directory: `server/`
 4.  Poll status endpoint.
 5.  Trigger video generation for the completed project.
 6.  Verify outputs in the `output/` directory.
+
+---
+
+## Performance Optimization Plan (Phase 1 + Phase 2)
+
+### Objective
+Reduce markdown tutorial build latency from 30+ minutes to a practical low-latency baseline by shrinking prompt/context size and parallelizing chapter generation.
+
+### Checklist
+- [x] Define optimization scope and measurable target
+- [x] Create implementation checklist and execution order
+- [x] Phase 1: Add prompt/context caps for relationship and chapter generation
+- [x] Phase 1: Reduce LLM retry tail latency for text nodes
+- [x] Phase 2: Convert chapter writer to async parallel execution with bounded concurrency
+- [ ] Run end-to-end benchmark and compare before/after runtime
+- [ ] Tune default concurrency and context caps with real repos
+
+### Phase 1 Implementation Details
+1. Prompt/context controls
+- Add configurable environment caps for relationship analysis context:
+    - `FAST_REL_MAX_FILE_CHARS`
+    - `FAST_REL_MAX_CONTEXT_CHARS`
+- Add configurable environment caps for chapter write context:
+    - `FAST_CHAPTER_MAX_FILE_CHARS`
+    - `FAST_CHAPTER_MAX_CONTEXT_CHARS`
+- Replace unbounded previous chapter summary expansion with bounded, metadata-only bridge context.
+
+2. Retry tail-latency tuning
+- Reduce default retries from `5` to `2` for text-generation nodes.
+- Reduce default retry wait from `20s` to `4s`.
+- Make retry behavior configurable through env:
+    - `LLM_NODE_MAX_RETRIES`
+    - `LLM_NODE_RETRY_WAIT_SEC`
+
+### Phase 2 Implementation Details
+1. Parallel chapter generation
+- Replace sequential `BatchNode` chapter writer with `AsyncParallelBatchNode`.
+- Wrap blocking LLM calls with `asyncio.to_thread(...)`.
+- Add bounded concurrency via `asyncio.Semaphore` and env var:
+    - `FAST_CHAPTER_PARALLELISM` (default `3`)
+
+2. Async flow execution
+- Run text pipeline with `AsyncFlow` so mixed sync + async nodes can be orchestrated.
+- Update pipeline runner to invoke async flow safely.
+
+### Acceptance Criteria
+- Text generation starts producing chapters significantly earlier.
+- Chapter generation stage runtime reduced materially on medium repositories.
+- No regression in output folder structure and generated artifact format.
+- Existing API contracts remain unchanged.
