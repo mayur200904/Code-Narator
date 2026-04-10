@@ -1,77 +1,48 @@
 "use client"
 
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { useEffect, useState, useRef } from "react"
+import { useEffect, useRef } from "react"
+import type { JobLogEntry } from "@/lib/api"
 
-const LOG_MESSAGES = [
-    "Cloning repository...",
-    "Analyzing file structure...",
-    "Parsing dependencies...",
-    "Identifying core abstractions...",
-    "Generating flow diagrams...",
-    "Writing chapter content...",
-    "Compiling artifacts...",
-    "Optimizing output...",
-]
+interface TerminalLogsProps {
+    status: string
+    logs: JobLogEntry[]
+}
 
-export function TerminalLogs({ status }: { status: string }) {
-    const [logs, setLogs] = useState<string[]>(["> Initializing system..."])
+export function TerminalLogs({ status, logs }: TerminalLogsProps) {
     const scrollRef = useRef<HTMLDivElement>(null)
 
     useEffect(() => {
-        if (status !== "processing") return
-
-        let i = 0
-        const interval = setInterval(() => {
-            if (i < LOG_MESSAGES.length) {
-                setLogs(prev => [...prev, `> ${LOG_MESSAGES[i]}`])
-                i++
-            } else {
-                // Rotate a "processing" indicator instead of adding lines
-                setLogs(prev => {
-                    const last = prev[prev.length - 1]
-                    if (last.startsWith("> Processing complex nodes")) {
-                        if (last.endsWith("...")) return [...prev.slice(0, -1), "> Processing complex nodes"]
-                        return [...prev.slice(0, -1), last + "."]
-                    }
-                    return [...prev, "> Processing complex nodes..."]
-                })
+        if (scrollRef.current) {
+            const scrollElement = scrollRef.current.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement
+            if (scrollElement) {
+                scrollElement.scrollTop = scrollElement.scrollHeight
             }
-
-            // Auto-scroll
-            if (scrollRef.current) {
-                const scrollElement = scrollRef.current.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement
-                if (scrollElement) scrollElement.scrollTop = scrollElement.scrollHeight
-            }
-        }, 3000)
-
-        return () => clearInterval(interval)
-    }, [status])
-
-    useEffect(() => {
-        if (status === "completed") {
-            setLogs(prev => [...prev, "> Process Completed Successfully.", "> Artifacts Ready."])
         }
-    }, [status])
+    }, [logs])
+
+    const displayLogs = logs.length
+        ? logs
+        : [{ timestamp: "", message: "Job initialized. Waiting for backend logs..." }]
 
     return (
-        <div className="w-full bg-black border border-zinc-800 rounded-lg p-2 font-mono text-xs text-green-400 h-48 flex flex-col shadow-inner">
-            <div className="flex items-center gap-2 border-b border-zinc-900 pb-2 mb-2 px-2">
-                <div className="w-2 h-2 rounded-full bg-red-500" />
-                <div className="w-2 h-2 rounded-full bg-yellow-500" />
-                <div className="w-2 h-2 rounded-full bg-green-500" />
-                <span className="text-zinc-600 ml-2">TERMINAL</span>
+        <section aria-label="Execution logs" className="flex h-60 w-full flex-col overflow-hidden rounded-2xl border border-white/15 bg-[#090d12] font-mono text-xs text-emerald-200 shadow-inner shadow-black/60">
+            <div className="flex items-center gap-2 border-b border-white/10 px-3 py-2">
+                <div aria-hidden="true" className="h-2.5 w-2.5 rounded-full bg-red-500" />
+                <div aria-hidden="true" className="h-2.5 w-2.5 rounded-full bg-amber-400" />
+                <div aria-hidden="true" className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
+                <span className="ml-2 text-[10px] uppercase tracking-[0.16em] text-(--color-text-secondary)">Execution Logs</span>
             </div>
-            <ScrollArea className="flex-1 px-2" viewportRef={scrollRef}>
-                <div className="space-y-1">
-                    {logs.map((log, i) => (
-                        <div key={i}>{log}</div>
+            <ScrollArea className="flex-1 px-3 py-2" viewportRef={scrollRef}>
+                <div className="space-y-1.5 leading-5" role="log" aria-live="polite" aria-relevant="additions text">
+                    {displayLogs.map((log, i) => (
+                        <div key={`${log.timestamp}-${i}`} className="text-[11px] text-emerald-200/90">{`> ${log.message}`}</div>
                     ))}
                     {status === "processing" && (
-                        <div className="animate-pulse">_</div>
+                        <div className="animate-pulse text-emerald-300/70">_</div>
                     )}
                 </div>
             </ScrollArea>
-        </div>
+        </section>
     )
 }

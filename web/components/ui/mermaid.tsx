@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useEffect, useRef, useState } from "react"
+import React, { useEffect, useId, useState } from "react"
 import mermaid from "mermaid"
 import { Loader2 } from "lucide-react"
 
@@ -13,28 +13,28 @@ mermaid.initialize({
 
 export function Mermaid({ chart }: { chart: string }) {
     const [svg, setSvg] = useState<string>("")
-    const [loading, setLoading] = useState(true)
-    const [error, setError] = useState(false)
-    const id = useRef(`mermaid-${Math.random().toString(36).substr(2, 9)}`)
+    const [renderedChart, setRenderedChart] = useState<string>("")
+    const [failedChart, setFailedChart] = useState<string>("")
+    const id = useId().replace(/:/g, "-")
 
     useEffect(() => {
         if (!chart) return
 
-        setLoading(true)
-        setError(false)
-
         // We must render asynchronously
-        mermaid.render(id.current, chart)
+        mermaid.render(`mermaid-${id}`, chart)
             .then((res) => {
                 setSvg(res.svg)
-                setLoading(false)
+                setRenderedChart(chart)
+                setFailedChart("")
             })
             .catch((err) => {
                 console.warn("Mermaid rendering failed:", err)
-                setError(true) // Fallback to text
-                setLoading(false)
+                setFailedChart(chart)
             })
-    }, [chart])
+    }, [chart, id])
+
+    const loading = chart !== renderedChart && failedChart !== chart
+    const error = failedChart === chart
 
     if (error) {
         return <pre className="bg-red-900/20 text-red-200 p-4 rounded overflow-auto">{chart}</pre>
