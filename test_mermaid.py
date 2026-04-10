@@ -1,36 +1,37 @@
+import os
 import base64
 import requests
 import io
 from PIL import Image
+import pytest
 
-def test_render(mermaid_code):
-    print(f"Testing render with code:\n{mermaid_code!r}\n")
+
+def _render_mermaid(mermaid_code: str):
     try:
         graph_bytes = mermaid_code.encode("utf8")
         base64_bytes = base64.urlsafe_b64encode(graph_bytes)
         base64_string = base64_bytes.decode("ascii")
         
         url = f"https://mermaid.ink/img/{base64_string}?bgColor=333333"
-        print(f"URL: {url}")
-        
         response = requests.get(url, timeout=10)
-        
-        if response.status_code == 200:
-            print("Success! Image received.")
-            try:
-                img = Image.open(io.BytesIO(response.content))
-                print(f"Image size: {img.size}")
-            except:
-                print("Could not open image.")
-        else:
-            print(f"Failed description: {response.status_code}")
-            print(f"Response: {response.text}")
+        response.raise_for_status()
+        img = Image.open(io.BytesIO(response.content))
+        return img.size
     except Exception as e:
-        print(f"Exception: {e}")
+        raise AssertionError(f"Mermaid render failed: {e}") from e
 
-# Failing content from logs
-# failing_content = "graph TD\n A[User/Program] --> B{FastAPI API}\n B -- Authenticated POST Requests --> C[Backend Workflow (Document URLs & Questions)]\n C --> D[Structured JSON Answer]"
 
-# Fixed content (Quoted labels)
-fixed_content = 'graph TD\n A["User/Program"] --> B{"FastAPI API"}\n B -- "Authenticated POST Requests" --> C["Backend Workflow (Document URLs & Questions)"]\n C --> D["Structured JSON Answer"]'
-test_render(fixed_content)
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.getenv("RUN_MERMAID_INTEGRATION") != "1",
+    reason="External Mermaid integration test is opt-in (set RUN_MERMAID_INTEGRATION=1).",
+)
+def test_mermaid_render_with_quoted_labels():
+    fixed_content = (
+        'graph TD\\n A["User/Program"] --> B{"FastAPI API"}\\n '
+        'B -- "Authenticated POST Requests" --> C["Backend Workflow (Document URLs & Questions)"]\\n '
+        'C --> D["Structured JSON Answer"]'
+    )
+    width, height = _render_mermaid(fixed_content)
+    assert width > 0
+    assert height > 0
