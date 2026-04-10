@@ -1,4 +1,5 @@
-from pocketflow import Flow
+import os
+from pocketflow import Flow, AsyncFlow
 # Import all node classes from nodes.py
 from nodes import (
     FetchRepo,
@@ -24,12 +25,15 @@ def create_tutorial_flow(video_mode="none"): # modes: "none", "only"
       - "only": Video generation only (loads existing chapters).
     """
 
+    node_max_retries = int(os.getenv("LLM_NODE_MAX_RETRIES", "2"))
+    node_retry_wait = int(os.getenv("LLM_NODE_RETRY_WAIT_SEC", "4"))
+
     # Instantiate nodes
     fetch_repo = FetchRepo()
-    identify_abstractions = IdentifyAbstractions(max_retries=5, wait=20)
-    analyze_relationships = AnalyzeRelationships(max_retries=5, wait=20)
-    order_chapters = OrderChapters(max_retries=5, wait=20)
-    write_chapters = WriteChapters(max_retries=5, wait=20) # This is a BatchNode
+    identify_abstractions = IdentifyAbstractions(max_retries=node_max_retries, wait=node_retry_wait)
+    analyze_relationships = AnalyzeRelationships(max_retries=node_max_retries, wait=node_retry_wait)
+    order_chapters = OrderChapters(max_retries=node_max_retries, wait=node_retry_wait)
+    write_chapters = WriteChapters(max_retries=node_max_retries, wait=node_retry_wait)
     combine_tutorial = CombineTutorial()
 
     # Video nodes
@@ -57,6 +61,7 @@ def create_tutorial_flow(video_mode="none"): # modes: "none", "only"
         order_chapters >> write_chapters
         write_chapters >> combine_tutorial
         
-        tutorial_flow = Flow(start=fetch_repo)
+        # Text pipeline uses AsyncFlow to support parallel async chapter generation.
+        tutorial_flow = AsyncFlow(start=fetch_repo)
 
     return tutorial_flow

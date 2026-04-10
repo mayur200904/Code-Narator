@@ -1,10 +1,12 @@
 import os
 import re
+import asyncio
 import yaml
-from pocketflow import Node, BatchNode
+from pocketflow import Node, AsyncParallelBatchNode
 from utils.crawl_github_files import crawl_github_files
 from utils.call_llm import call_llm
 from utils.crawl_local_files import crawl_local_files
+from utils.repo_identity import derive_project_name
 
 
 # Helper to get content for specific file indices
@@ -19,6 +21,29 @@ def get_content_for_indices(files_data, indices):
     return content_map
 
 
+def build_limited_file_context(content_map, max_file_chars, max_context_chars):
+    """Build prompt context from file snippets while enforcing strict character budgets."""
+    chunks = []
+    total_chars = 0
+
+    for idx_path, content in content_map.items():
+        snippet = content[:max_file_chars]
+        truncated_note = ""
+        if len(content) > max_file_chars:
+            truncated_note = f"\n# [truncated {len(content) - max_file_chars} chars]"
+
+        file_label = idx_path.split("# ")[1] if "# " in idx_path else idx_path
+        entry = f"--- File: {file_label} ---\n{snippet}{truncated_note}\n"
+
+        if total_chars + len(entry) > max_context_chars:
+            break
+
+        chunks.append(entry)
+        total_chars += len(entry)
+
+    return "\n".join(chunks)
+
+
 class FetchRepo(Node):
     def prep(self, shared):
         repo_url = shared.get("repo_url")
@@ -28,7 +53,7 @@ class FetchRepo(Node):
         if not project_name:
             # Basic name derivation from URL or directory
             if repo_url:
-                project_name = repo_url.split("/")[-1].replace(".git", "")
+                project_name = derive_project_name(repo_url)
             else:
                 project_name = os.path.basename(os.path.abspath(local_dir))
             shared["project_name"] = project_name
@@ -45,6 +70,7 @@ class FetchRepo(Node):
             "include_patterns": include_patterns,
             "exclude_patterns": exclude_patterns,
             "max_file_size": max_file_size,
+            "max_files": int(os.getenv("FAST_CRAWL_MAX_FILES", "450")),
             "use_relative_paths": True,
         }
 
@@ -57,6 +83,7 @@ class FetchRepo(Node):
                 include_patterns=prep_res["include_patterns"],
                 exclude_patterns=prep_res["exclude_patterns"],
                 max_file_size=prep_res["max_file_size"],
+                max_files=prep_res["max_files"],
                 use_relative_paths=prep_res["use_relative_paths"],
             )
         else:
@@ -78,7 +105,60 @@ class FetchRepo(Node):
         return files_list
 
     def post(self, shared, prep_res, exec_res):
-        shared["files"] = exec_res  # List of (path, content) tuples
+        files = exec_res  # List of (path, content) tuples
+
+        # Fast-path optimization for large repositories: keep the most informative files first.
+        max_files = int(os.getenv("FAST_MAX_FILES", "220"))
+        if len(files) > max_files:
+            def file_score(path, content):
+                p = path.lower()
+                score = 0
+
+                # Prefer likely entrypoints/config/core code.
+                for token in [
+                    "main", "app", "server", "core", "pipeline", "flow", "src/",
+                    "requirements", "package.json", "pyproject", "dockerfile", "config",
+                    "readme",
+                ]:
+                    if token in p:
+                        score += 18
+
+                # Prefer code-centric extensions.
+                for ext, points in {
+                    ".py": 30,
+                    ".ts": 24,
+                    ".tsx": 20,
+                    ".js": 20,
+                    ".jsx": 16,
+                    ".java": 18,
+                    ".go": 18,
+                    ".rs": 18,
+                    ".md": 8,
+                    ".yaml": 6,
+                    ".yml": 6,
+                    ".json": 6,
+                }.items():
+                    if p.endswith(ext):
+                        score += points
+                        break
+
+                # De-prioritize low-signal folders.
+                for token in ["/test", "tests/", "docs/", "examples/", "node_modules", "dist/", "build/"]:
+                    if token in p:
+                        score -= 22
+
+                # Slight preference for medium-sized files over tiny stubs.
+                score += min(len(content) // 2000, 8)
+                return score
+
+            files = sorted(
+                files,
+                key=lambda item: file_score(item[0], item[1]),
+                reverse=True,
+            )[:max_files]
+            print(f"Large repo optimization: trimmed files from {len(exec_res)} to {len(files)} (FAST_MAX_FILES={max_files}).")
+
+        shared["files"] = files
 
 
 class IdentifyAbstractions(Node):
@@ -88,13 +168,33 @@ class IdentifyAbstractions(Node):
         language = shared.get("language", "english")  # Get language
         use_cache = shared.get("use_cache", True)  # Get use_cache flag, default to True
         max_abstraction_num = shared.get("max_abstraction_num", 10)  # Get max_abstraction_num, default to 10
+        tutorial_max_files = max(1, int(os.getenv("FAST_TUTORIAL_MAX_FILES", "5")))
+        max_abstraction_num = min(max_abstraction_num, tutorial_max_files)
+
+        large_repo_threshold = int(os.getenv("FAST_LARGE_REPO_FILE_THRESHOLD", "140"))
+        if len(files_data) >= large_repo_threshold:
+            max_abstraction_num = min(max_abstraction_num, int(os.getenv("FAST_MAX_ABSTRACTIONS", "6")))
+            print(
+                f"Large repo optimization: using up to {max_abstraction_num} abstractions "
+                f"for {len(files_data)} files."
+            )
 
         # Helper to create context from files, respecting limits (basic example)
         def create_llm_context(files_data):
+            max_file_chars = int(os.getenv("FAST_MAX_FILE_CHARS", "3500"))
+            max_context_chars = int(os.getenv("FAST_MAX_CONTEXT_CHARS", "120000"))
+
             context = ""
             file_info = []  # Store tuples of (index, path)
             for i, (path, content) in enumerate(files_data):
-                entry = f"--- File Index {i}: {path} ---\n{content}\n\n"
+                truncated = content[:max_file_chars]
+                truncated_note = ""
+                if len(content) > max_file_chars:
+                    truncated_note = f"\n# [truncated {len(content) - max_file_chars} chars]"
+
+                entry = f"--- File Index {i}: {path} ---\n{truncated}{truncated_note}\n\n"
+                if len(context) + len(entry) > max_context_chars:
+                    break
                 context += entry
                 file_info.append((i, path))
 
@@ -270,10 +370,14 @@ class AnalyzeRelationships(Node):
         relevant_files_content_map = get_content_for_indices(
             files_data, sorted(list(all_relevant_indices))
         )
-        # Format file content for context
-        file_context_str = "\\n\\n".join(
-            f"--- File: {idx_path} ---\\n{content}"
-            for idx_path, content in relevant_files_content_map.items()
+        rel_max_file_chars = int(os.getenv("FAST_REL_MAX_FILE_CHARS", "2200"))
+        rel_max_context_chars = int(os.getenv("FAST_REL_MAX_CONTEXT_CHARS", "50000"))
+
+        # Format bounded file context for relationship analysis
+        file_context_str = build_limited_file_context(
+            relevant_files_content_map,
+            max_file_chars=rel_max_file_chars,
+            max_context_chars=rel_max_context_chars,
         )
         context += file_context_str
 
@@ -526,6 +630,10 @@ Now, provide the YAML output:
                 f"Ordered list length ({len(ordered_indices)}) does not match number of abstractions ({num_abstractions}). Missing indices: {set(range(num_abstractions)) - seen_indices}"
             )
 
+        # Final guardrail so tutorial generation never exceeds the configured file cap.
+        tutorial_max_files = max(1, int(os.getenv("FAST_TUTORIAL_MAX_FILES", "5")))
+        ordered_indices = ordered_indices[:tutorial_max_files]
+
         print(f"Determined chapter order (indices): {ordered_indices}")
         return ordered_indices  # Return the list of indices
 
@@ -534,9 +642,14 @@ Now, provide the YAML output:
         shared["chapter_order"] = exec_res  # List of indices
 
 
-class WriteChapters(BatchNode):
-    def prep(self, shared):
+class WriteChapters(AsyncParallelBatchNode):
+    def __init__(self, max_retries=2, wait=4):
+        super().__init__(max_retries=max_retries, wait=wait)
+
+    async def prep_async(self, shared):
         chapter_order = shared["chapter_order"]  # List of indices
+        tutorial_max_files = max(1, int(os.getenv("FAST_TUTORIAL_MAX_FILES", "5")))
+        chapter_order = chapter_order[:tutorial_max_files]
         abstractions = shared[
             "abstractions"
         ]  # List of {"name": str, "description": str, "files": [int]}
@@ -544,13 +657,12 @@ class WriteChapters(BatchNode):
         project_name = shared["project_name"]
         language = shared.get("language", "english")
         use_cache = shared.get("use_cache", True)  # Get use_cache flag, default to True
+        output_path = os.path.join(shared.get("output_dir", "output"), project_name)
+        os.makedirs(output_path, exist_ok=True)
 
-        # Get already written chapters to provide context
-        # We store them temporarily during the batch run, not in shared memory yet
-        # The 'previous_chapters_summary' will be built progressively in the exec context
-        self.chapters_written_so_far = (
-            []
-        )  # Use instance variable for temporary storage across exec calls
+        # Strict sequencing: chapter N waits until chapter N-1 is complete.
+        self._chapter_turn_condition = asyncio.Condition()
+        self._next_chapter_to_write = 1
 
         # Create a complete list of all chapters
         all_chapters = []
@@ -606,6 +718,8 @@ class WriteChapters(BatchNode):
                 items_to_process.append(
                     {
                         "chapter_num": i + 1,
+                        "chapter_filename": chapter_filenames[abstraction_index]["filename"],
+                        "output_path": output_path,
                         "abstraction_index": abstraction_index,
                         "abstraction_details": abstraction_details,  # Has potentially translated name/desc
                         "related_files_content_map": related_files_content_map,
@@ -616,7 +730,6 @@ class WriteChapters(BatchNode):
                         "next_chapter": next_chapter,  # Add next chapter info (uses potentially translated name)
                         "language": language,  # Add language for multi-language support
                         "use_cache": use_cache, # Pass use_cache flag
-                        # previous_chapters_summary will be added dynamically in exec
                     }
                 )
             else:
@@ -625,9 +738,13 @@ class WriteChapters(BatchNode):
                 )
 
         print(f"Preparing to write {len(items_to_process)} chapters...")
-        return items_to_process  # Iterable for BatchNode
+        print(f"CHAPTER_TOTAL: {len(items_to_process)}")
 
-    def exec(self, item):
+        # Prioritize chapter 1 generation first to improve perceived responsiveness.
+        items_to_process.sort(key=lambda item: 0 if item["chapter_num"] == 1 else 1)
+        return items_to_process  # Iterable for AsyncParallelBatchNode
+
+    async def exec_async(self, item):
         # This runs for each item prepared above
         abstraction_name = item["abstraction_details"][
             "name"
@@ -639,91 +756,91 @@ class WriteChapters(BatchNode):
         project_name = item.get("project_name")
         language = item.get("language", "english")
         use_cache = item.get("use_cache", True) # Read use_cache from item
+
+        # Serialize generation in chapter order to avoid concurrent LLM pressure.
+        async with self._chapter_turn_condition:
+            while chapter_num != self._next_chapter_to_write:
+                await self._chapter_turn_condition.wait()
+
         print(f"Writing chapter {chapter_num} for: {abstraction_name} using LLM...")
 
-        # Prepare file context string from the map
-        file_context_str = "\n\n".join(
-            f"--- File: {idx_path.split('# ')[1] if '# ' in idx_path else idx_path} ---\n{content}"
-            for idx_path, content in item["related_files_content_map"].items()
+        chapter_max_file_chars = int(os.getenv("FAST_CHAPTER_MAX_FILE_CHARS", "1400"))
+        chapter_max_context_chars = int(os.getenv("FAST_CHAPTER_MAX_CONTEXT_CHARS", "30000"))
+
+        # Prepare bounded file context string for chapter generation.
+        file_context_str = build_limited_file_context(
+            item["related_files_content_map"],
+            max_file_chars=chapter_max_file_chars,
+            max_context_chars=chapter_max_context_chars,
         )
 
-        # Get summary of chapters written *before* this one
-        # Use the temporary instance variable
-        previous_chapters_summary = "\n---\n".join(self.chapters_written_so_far)
+        # Keep cross-chapter context compact to avoid prompt growth explosions.
+        if item["prev_chapter"]:
+            previous_chapters_summary = (
+                f"Previous chapter: {item['prev_chapter']['num']}. "
+                f"{item['prev_chapter']['name']} ({item['prev_chapter']['filename']})"
+            )
+        else:
+            previous_chapters_summary = "This is the first chapter."
 
-        # Add language instruction and context notes only if not English
+        # Add language instruction only when non-English output is requested.
         language_instruction = ""
-        concept_details_note = ""
-        structure_note = ""
-        prev_summary_note = ""
-        instruction_lang_note = ""
-        mermaid_lang_note = ""
-        code_comment_note = ""
-        link_lang_note = ""
-        tone_note = ""
+        output_language = "English"
         if language.lower() != "english":
             lang_cap = language.capitalize()
-            language_instruction = f"IMPORTANT: Write this ENTIRE tutorial chapter in **{lang_cap}**. Some input context (like concept name, description, chapter list, previous summary) might already be in {lang_cap}, but you MUST translate ALL other generated content including explanations, examples, technical terms, and potentially code comments into {lang_cap}. DO NOT use English anywhere except in code syntax, required proper nouns, or when specified. The entire output MUST be in {lang_cap}.\n\n"
-            concept_details_note = f" (Note: Provided in {lang_cap})"
-            structure_note = f" (Note: Chapter names might be in {lang_cap})"
-            prev_summary_note = f" (Note: This summary might be in {lang_cap})"
-            instruction_lang_note = f" (in {lang_cap})"
-            mermaid_lang_note = f" (Use {lang_cap} for labels/text if appropriate)"
-            code_comment_note = f" (Translate to {lang_cap} if possible, otherwise keep minimal English for clarity)"
-            link_lang_note = (
-                f" (Use the {lang_cap} chapter title from the structure above)"
+            output_language = lang_cap
+            language_instruction = (
+                f"IMPORTANT: Write the chapter in {lang_cap}. "
+                f"Code syntax and identifiers stay unchanged.\n\n"
             )
-            tone_note = f" (appropriate for {lang_cap} readers)"
+
+        prev_link = ""
+        if item["prev_chapter"]:
+            prev_link = f"[{item['prev_chapter']['name']}]({item['prev_chapter']['filename']})"
+
+        next_link = ""
+        if item["next_chapter"]:
+            next_link = f"[{item['next_chapter']['name']}]({item['next_chapter']['filename']})"
 
         prompt = f"""
-{language_instruction}Write a very beginner-friendly tutorial chapter (in Markdown format) for the project `{project_name}` about the concept: "{abstraction_name}". This is Chapter {chapter_num}.
+    {language_instruction}Write a high-quality beginner tutorial chapter in Markdown.
 
-Concept Details{concept_details_note}:
-- Name: {abstraction_name}
-- Description:
-{abstraction_description}
+    Project: {project_name}
+    Chapter number: {chapter_num}
+    Chapter title: {abstraction_name}
+    Output language: {output_language}
 
-Complete Tutorial Structure{structure_note}:
-{item["full_chapter_listing"]}
+    Concept description:
+    {abstraction_description}
 
-Context from previous chapters{prev_summary_note}:
-{previous_chapters_summary if previous_chapters_summary else "This is the first chapter."}
+    Tutorial chapter list:
+    {item["full_chapter_listing"]}
 
-Relevant Code Snippets (Code itself remains unchanged):
-{file_context_str if file_context_str else "No specific code snippets provided for this abstraction."}
+    Previous chapter context:
+    {previous_chapters_summary}
 
-Instructions for the chapter (Generate content in {language.capitalize()} unless specified otherwise):
-- Start with a clear heading (e.g., `# Chapter {chapter_num}: {abstraction_name}`). Use the provided concept name.
+    Previous chapter link: {prev_link or "None"}
+    Next chapter link: {next_link or "None"}
 
-- If this is not the first chapter, begin with a brief transition from the previous chapter{instruction_lang_note}, referencing it with a proper Markdown link using its name{link_lang_note}.
+    Relevant code snippets:
+    {file_context_str if file_context_str else "No specific code snippets provided for this abstraction."}
 
-- Begin with a high-level motivation explaining what problem this abstraction solves{instruction_lang_note}. Start with a central use case as a concrete example. The whole chapter should guide the reader to understand how to solve this use case. Make it very minimal and friendly to beginners.
+    Requirements:
+    1. Start with exactly: `# Chapter {chapter_num}: {abstraction_name}`
+    2. Keep quality high and beginner-friendly; target around 550-850 words.
+    3. Cover sections: Motivation, Core Concepts, Practical Usage, Internal Mechanics, Conclusion.
+    4. Add 1-2 short code blocks (each <= 10 lines) with clear explanations.
+    5. Add one concise Mermaid diagram only if it improves clarity.
+    6. Use links to previous/next chapter when available.
+    7. Keep explanations concrete with analogies and a simple end-to-end use case.
+    8. Output only Markdown.
+    """
+        chapter_content = await asyncio.to_thread(
+            call_llm,
+            prompt,
+            use_cache,
+        )
 
-- If the abstraction is complex, break it down into key concepts. Explain each concept one-by-one in a very beginner-friendly way{instruction_lang_note}.
-
-- Explain how to use this abstraction to solve the use case{instruction_lang_note}. Give example inputs and outputs for code snippets (if the output isn't values, describe at a high level what will happen{instruction_lang_note}).
-
-- Each code block should be BELOW 10 lines! If longer code blocks are needed, break them down into smaller pieces and walk through them one-by-one. Aggresively simplify the code to make it minimal. Use comments{code_comment_note} to skip non-important implementation details. Each code block should have a beginner friendly explanation right after it{instruction_lang_note}.
-
-- Describe the internal implementation to help understand what's under the hood{instruction_lang_note}. First provide a non-code or code-light walkthrough on what happens step-by-step when the abstraction is called{instruction_lang_note}. It's recommended to use a simple sequenceDiagram with a dummy example - keep it minimal with at most 5 participants to ensure clarity. If participant name has space, use: `participant QP as Query Processing`. {mermaid_lang_note}.
-
-- Then dive deeper into code for the internal implementation with references to files. Provide example code blocks, but make them similarly simple and beginner-friendly. Explain{instruction_lang_note}.
-
-- IMPORTANT: When you need to refer to other core abstractions covered in other chapters, ALWAYS use proper Markdown links like this: [Chapter Title](filename.md). Use the Complete Tutorial Structure above to find the correct filename and the chapter title{link_lang_note}. Translate the surrounding text.
-
-- Use mermaid diagrams to illustrate complex concepts (```mermaid``` format). {mermaid_lang_note}.
-
-- Heavily use analogies and examples throughout{instruction_lang_note} to help beginners understand.
-
-- End the chapter with a brief conclusion that summarizes what was learned{instruction_lang_note} and provides a transition to the next chapter{instruction_lang_note}. If there is a next chapter, use a proper Markdown link: [Next Chapter Title](next_chapter_filename){link_lang_note}.
-
-- Ensure the tone is welcoming and easy for a newcomer to understand{tone_note}.
-
-- Output *only* the Markdown content for this chapter.
-
-Now, directly provide a super beginner-friendly Markdown output (DON'T need ```markdown``` tags):
-"""
-        chapter_content = call_llm(prompt, use_cache=(use_cache and self.cur_retry == 0)) # Use cache only if enabled and not retrying
         # Basic validation/cleanup
         actual_heading = f"# Chapter {chapter_num}: {abstraction_name}"  # Use potentially translated name
         if not chapter_content.strip().startswith(f"# Chapter {chapter_num}"):
@@ -737,16 +854,26 @@ Now, directly provide a super beginner-friendly Markdown output (DON'T need ```m
             else:  # Otherwise, prepend it
                 chapter_content = f"{actual_heading}\n\n{chapter_content}"
 
-        # Add the generated content to our temporary list for the next iteration's context
-        self.chapters_written_so_far.append(chapter_content)
+        # Progressive output: write each chapter immediately so users can read artifacts earlier.
+        chapter_path = os.path.join(item["output_path"], item["chapter_filename"])
+        with open(chapter_path, "w", encoding="utf-8") as f:
+            f.write(chapter_content)
+        print(f"  - Wrote chapter draft: {chapter_path}")
+        print(f"CHAPTER_READY: {item['chapter_filename']}")
+
+        async with self._chapter_turn_condition:
+            self._next_chapter_to_write += 1
+            self._chapter_turn_condition.notify_all()
 
         return chapter_content  # Return the Markdown string (potentially translated)
 
-    def post(self, shared, prep_res, exec_res_list):
+    async def post_async(self, shared, prep_res, exec_res_list):
         # exec_res_list contains the generated Markdown for each chapter, in order
         shared["chapters"] = exec_res_list
-        # Clean up the temporary instance variable
-        del self.chapters_written_so_far
+        if hasattr(self, "_chapter_turn_condition"):
+            del self._chapter_turn_condition
+        if hasattr(self, "_next_chapter_to_write"):
+            del self._next_chapter_to_write
         print(f"Finished writing {len(exec_res_list)} chapters.")
 
 

@@ -13,6 +13,7 @@ from core.constants import DEFAULT_INCLUDE_PATTERNS, DEFAULT_EXCLUDE_PATTERNS
 
 # Import the core pipeline logic
 from core.pipeline import run_tutorial_pipeline
+from utils.repo_identity import derive_project_name
 
 # --- Main Function ---
 def main():
@@ -49,7 +50,7 @@ def main():
     # Prepare parameters for pipeline
     params = {
         "repo_url": args.repo,
-        "project_name": args.name,
+        "project_name": args.name or derive_project_name(args.repo),
         "output_dir": args.output,
         "clean": args.clean,
         "video_mode": "only" if args.video else "none",

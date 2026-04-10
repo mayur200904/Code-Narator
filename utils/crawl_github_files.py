@@ -12,6 +12,7 @@ def crawl_github_files(
     repo_url, 
     token=None, 
     max_file_size: int = 1 * 1024 * 1024,  # 1 MB
+    max_files: int = None,
     use_relative_paths: bool = False,
     include_patterns: Union[str, Set[str]] = None,
     exclude_patterns: Union[str, Set[str]] = None
@@ -27,6 +28,7 @@ def crawl_github_files(
             - **Recommended for public repos to avoid rate limits.**
             - Can be passed explicitly or set via the `GITHUB_TOKEN` environment variable.
         max_file_size (int, optional): Maximum file size in bytes to download (default: 1 MB)
+        max_files (int, optional): Maximum number of files to download before stopping traversal.
         use_relative_paths (bool, optional): If True, file paths will be relative to the specified subdirectory
         include_patterns (str or set of str, optional): Pattern or set of patterns specifying which files to include (e.g., "*.py", {"*.md", "*.txt"}).
                                                        If None, all files are included.
@@ -59,15 +61,16 @@ def crawl_github_files(
 
         return include_file
 
-    # Detect SSH URL (git@ or .git suffix)
-    is_ssh_url = repo_url.startswith("git@") or repo_url.endswith(".git")
+    # Detect true SSH URLs only. Do not treat HTTPS URLs ending with .git as SSH.
+    parsed_for_scheme = urlparse(repo_url)
+    is_ssh_url = repo_url.startswith("git@") or parsed_for_scheme.scheme == "ssh"
 
     if is_ssh_url:
         # Clone repo via SSH to temp dir
         with tempfile.TemporaryDirectory() as tmpdirname:
             print(f"Cloning SSH repo {repo_url} to temp dir {tmpdirname} ...")
             try:
-                repo = git.Repo.clone_from(repo_url, tmpdirname)
+                repo = git.Repo.clone_from(repo_url, tmpdirname, depth=1, single_branch=True)
             except Exception as e:
                 print(f"Error cloning repo: {e}")
                 return {"files": {}, "stats": {"error": str(e)}}
@@ -83,6 +86,9 @@ def crawl_github_files(
 
             for root, dirs, filenames in os.walk(tmpdirname):
                 for filename in filenames:
+                    if max_files and len(files) >= max_files:
+                        break
+
                     abs_path = os.path.join(root, filename)
                     rel_path = os.path.relpath(abs_path, tmpdirname)
 
@@ -111,6 +117,9 @@ def crawl_github_files(
                     except Exception as e:
                         print(f"Failed to read {rel_path}: {e}")
 
+                if max_files and len(files) >= max_files:
+                    break
+
             return {
                 "files": files,
                 "stats": {
@@ -120,6 +129,7 @@ def crawl_github_files(
                     "base_path": None,
                     "include_patterns": include_patterns,
                     "exclude_patterns": exclude_patterns,
+                    "max_files": max_files,
                     "source": "ssh_clone"
                 }
             }
@@ -134,6 +144,8 @@ def crawl_github_files(
     # Extract the basic components
     owner = path_parts[0]
     repo = path_parts[1]
+    if repo.endswith('.git'):
+        repo = repo[:-4]
     
     # Setup for GitHub API
     headers = {"Accept": "application/vnd.github.v3+json"}
@@ -210,9 +222,14 @@ def crawl_github_files(
     # Dictionary to store path -> content mapping
     files = {}
     skipped_files = []
+    stop_crawl = False
     
     def fetch_contents(path):
         """Fetch contents of the repository at a specific path and commit"""
+        nonlocal stop_crawl
+        if stop_crawl:
+            return
+
         url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
         params = {"ref": ref} if ref != None else {}
         
@@ -248,6 +265,10 @@ def crawl_github_files(
             contents = [contents]
         
         for item in contents:
+            if max_files and len(files) >= max_files:
+                stop_crawl = True
+                return
+
             item_path = item["path"]
             
             # Calculate relative path if requested
@@ -288,6 +309,9 @@ def crawl_github_files(
                     if file_response.status_code == 200:
                         files[rel_path] = file_response.text
                         print(f"Downloaded: {rel_path} ({file_size} bytes) ")
+                        if max_files and len(files) >= max_files:
+                            stop_crawl = True
+                            return
                     else:
                         print(f"Failed to download {rel_path}: {file_response.status_code}")
                 else:
@@ -306,6 +330,9 @@ def crawl_github_files(
                             file_content = base64.b64decode(content_data["content"]).decode('utf-8')
                             files[rel_path] = file_content
                             print(f"Downloaded: {rel_path} ({file_size} bytes)")
+                            if max_files and len(files) >= max_files:
+                                stop_crawl = True
+                                return
                         else:
                             print(f"Unexpected content format for {rel_path}")
                     else:
@@ -338,7 +365,8 @@ def crawl_github_files(
             "skipped_files": skipped_files,
             "base_path": specific_path if use_relative_paths else None,
             "include_patterns": include_patterns,
-            "exclude_patterns": exclude_patterns
+            "exclude_patterns": exclude_patterns,
+            "max_files": max_files,
         }
     }
 

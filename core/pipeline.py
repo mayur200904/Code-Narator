@@ -1,8 +1,10 @@
 import os
 import argparse
+import asyncio
 from flow import create_tutorial_flow
 from core.constants import DEFAULT_INCLUDE_PATTERNS, DEFAULT_EXCLUDE_PATTERNS
 import shutil
+from utils.repo_identity import derive_project_name
 
 def run_tutorial_pipeline(params: dict):
     """
@@ -34,7 +36,7 @@ def run_tutorial_pipeline(params: dict):
     
     # Derive project name if not provided
     if not project_name and repo_url:
-        project_name = repo_url.split("/")[-1].replace(".git", "")
+        project_name = derive_project_name(repo_url)
         
     if not project_name:
         raise ValueError("Project name could not be determined. Please provide 'project_name' or 'repo_url'.")
@@ -89,6 +91,9 @@ def run_tutorial_pipeline(params: dict):
 
     # Create and run flow
     tutorial_flow = create_tutorial_flow(video_mode=video_mode)
-    tutorial_flow.run(shared)
+    if hasattr(tutorial_flow, "run_async") and video_mode != "only":
+        asyncio.run(tutorial_flow.run_async(shared))
+    else:
+        tutorial_flow.run(shared)
     
     return shared
