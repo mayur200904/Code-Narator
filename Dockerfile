@@ -15,8 +15,18 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Fix ImageMagick security policy for TextClips (common issue)
-# Allow reading/writing text
-RUN sed -i 's/none/read,write/g' /etc/ImageMagick-6/policy.xml
+# Allow reading/writing text across common ImageMagick config locations.
+RUN set -eux; \
+        found=0; \
+        for p in /etc/ImageMagick-6/policy.xml /etc/ImageMagick-7/policy.xml /etc/ImageMagick*/policy.xml; do \
+            if [ -f "$p" ]; then \
+                sed -i 's/none/read,write/g' "$p"; \
+                found=1; \
+            fi; \
+        done; \
+        if [ "$found" -eq 0 ]; then \
+            echo "No ImageMagick policy.xml found; continuing without policy patch."; \
+        fi
 
 # Copy requirements
 COPY requirements.txt .
