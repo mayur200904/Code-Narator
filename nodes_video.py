@@ -5,6 +5,8 @@ import yaml
 import subprocess
 import textwrap
 import re
+import shutil
+from uuid import uuid4
 from pocketflow import Node
 from utils.call_llm import call_llm
 from PIL import Image, ImageDraw, ImageFont
@@ -548,6 +550,44 @@ class AssembleVideo(Node):
         visual_data = prep_res["visual_data"]
         output_dir = prep_res["output_dir"]
         project_name = prep_res["project_name"]
+
+        def _contains_moov_atom(file_path: str) -> bool:
+            token = b"moov"
+            overlap = b""
+            try:
+                with open(file_path, "rb") as f:
+                    while True:
+                        chunk = f.read(1024 * 1024)
+                        if not chunk:
+                            return False
+                        data = overlap + chunk
+                        if token in data:
+                            return True
+                        overlap = data[-3:]
+            except OSError:
+                return False
+
+        def _is_valid_mp4_file(file_path: str) -> bool:
+            if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                return False
+
+            ffprobe_bin = shutil.which("ffprobe")
+            if ffprobe_bin:
+                cmd = [
+                    ffprobe_bin,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    file_path,
+                ]
+                probe = subprocess.run(cmd, capture_output=True, text=True)
+                return probe.returncode == 0 and bool((probe.stdout or "").strip())
+
+            # Fallback when ffprobe is unavailable.
+            return _contains_moov_atom(file_path)
         
         # Helper to find matching visual data for an audio chapter
         def get_visuals_for_chapter(idx, v_data):
@@ -558,6 +598,7 @@ class AssembleVideo(Node):
             
         # Collect ALL clips from all chapters into one list
         all_clips = []
+        all_audio_clips = []
         
         print("Assembling single consolidated video...")
 
@@ -577,6 +618,7 @@ class AssembleVideo(Node):
                     
                 try:
                     audio_clip = AudioFileClip(audio_path)
+                    all_audio_clips.append(audio_clip)
                     # MoviePy 2.x uses with_duration and with_audio instead of set_
                     if hasattr(ImageClip, 'with_duration'):
                         image_clip = ImageClip(image_path).with_duration(audio_clip.duration)
@@ -596,24 +638,54 @@ class AssembleVideo(Node):
             
         # Concatenate ALL clips into ONE video
         print(f"Concatenating {len(all_clips)} clips into single video...")
-        final_video = concatenate_videoclips(all_clips, method="compose")
-        
-        # Output single video file
+        final_video = None
         output_path = os.path.join(output_dir, project_name, "tutorial.mp4")
-        
-        print(f"Writing video to {output_path}...")
-        final_video.write_videofile(
-            output_path, 
-            fps=24, 
-            codec='libx264', 
-            audio_codec='aac',
-            threads=4  # Use multiple threads for faster encoding
-        )
-        
-        duration = final_video.duration
-        print(f"Video saved to: {output_path} (Duration: {duration:.1f}s)")
-        
-        return [output_path]  # Return as list for consistency
+        tmp_output_path = output_path + f".{uuid4().hex}.part"
+
+        try:
+            final_video = concatenate_videoclips(all_clips, method="compose")
+
+            print(f"Writing video to temporary file {tmp_output_path}...")
+            final_video.write_videofile(
+                tmp_output_path,
+                fps=24,
+                codec='libx264',
+                audio_codec='aac',
+                threads=4  # Use multiple threads for faster encoding
+            )
+
+            if not _is_valid_mp4_file(tmp_output_path):
+                raise ValueError("Encoded MP4 validation failed (missing metadata/moov atom or unreadable file).")
+
+            os.replace(tmp_output_path, output_path)
+
+            duration = final_video.duration
+            print(f"Video saved to: {output_path} (Duration: {duration:.1f}s)")
+            return [output_path]  # Return as list for consistency
+        finally:
+            if final_video is not None:
+                try:
+                    final_video.close()
+                except Exception:
+                    pass
+
+            for clip in all_clips:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
+
+            for audio_clip in all_audio_clips:
+                try:
+                    audio_clip.close()
+                except Exception:
+                    pass
+
+            if os.path.exists(tmp_output_path):
+                try:
+                    os.remove(tmp_output_path)
+                except OSError:
+                    pass
 
     def post(self, shared, prep_res, exec_res):
         shared["video_paths"] = exec_res
