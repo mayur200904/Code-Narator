@@ -640,7 +640,10 @@ class AssembleVideo(Node):
         print(f"Concatenating {len(all_clips)} clips into single video...")
         final_video = None
         output_path = os.path.join(output_dir, project_name, "tutorial.mp4")
-        tmp_output_path = output_path + f".{uuid4().hex}.part"
+        output_base, output_ext = os.path.splitext(output_path)
+        effective_ext = output_ext or ".mp4"
+        # Keep a real video extension so ffmpeg can infer the muxer.
+        tmp_output_path = f"{output_base}.{uuid4().hex}.tmp{effective_ext}"
 
         try:
             final_video = concatenate_videoclips(all_clips, method="compose")
